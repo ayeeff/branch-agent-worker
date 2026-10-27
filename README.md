@@ -104,6 +104,23 @@ baw run --agent "Antigravity" --task "task-46" -- code .
 
 ---
 
+## 🤖 LLM Agent Integration & System Prompts
+
+For complete autonomous agent operating instructions, see [**`AGENTS.md`**](file:///D:/github/branch-agent-worker/AGENTS.md).
+
+### Drop-in Prompt for Any Coding Agent
+Add this block directly to your agent's system prompt or project instructions:
+
+```markdown
+### Mandatory Multi-Agent Worktree Protocol
+1. Before editing any files, run `baw claim --agent "<Name>" --task "<TaskId>" --notepad`
+2. Open `branch.md` to see your allocated directory and staging URL.
+3. Restrict all edits, tool calls, and tests strictly inside that directory.
+4. When finished or interrupted, run `baw release --worktree <slot-id>`.
+```
+
+---
+
 ## ⚙️ Configuration (`.branch-worker.json`)
 
 Place `.branch-worker.json` in your repository root to customize behavior:
