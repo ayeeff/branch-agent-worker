@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "baseBranch": "main",
+  "remote": "origin",
+  "worktreeLayout": "adjacent",
+  "slots": [
+    {
+      "id": "pv2",
+      "branch": "preview2",
+      "folderName": "my-app-pv2"
+    },
+    {
+      "id": "pv3",
+      "branch": "preview3",
+      "folderName": "my-app-pv3"
+    },
+    {
+      "id": "pv4",
+      "branch": "preview4",
+      "folderName": "my-app-pv4"
+    }
+  ],
+  "ttlHours": 2,
+  "enableOsWriteLocks": true,
+  "lockTargetDir": "src",
+  "previewUrlTemplate": "https://{branch}-my-app.workers.dev"
+}

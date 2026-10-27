@@ -1,0 +1,28 @@
+{
+  "name": "branch-agent-worker",
+  "version": "1.0.0",
+  "description": "Modular worktree orchestration, atomic lock acquisition, and git synchronization for autonomous LLM coding agents",
+  "main": "./src/index.ts",
+  "bin": {
+    "branch-agent-worker": "./src/cli.ts",
+    "baw": "./src/cli.ts"
+  },
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/cli.ts",
+    "test": "bun test"
+  },
+  "keywords": [
+    "llm",
+    "agent",
+    "git",
+    "worktree",
+    "branch",
+    "locking",
+    "antigravity",
+    "claude",
+    "cursor"
+  ],
+  "author": "ayeeff",
+  "license": "MIT"
+}
