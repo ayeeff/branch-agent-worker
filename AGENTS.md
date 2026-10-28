@@ -9,6 +9,27 @@
 
 You are strictly prohibited from editing files in the root integration repository or any worktree that has not been claimed via this protocol.
 
+### 🚨 FAST PATH — Pushing / Merging Staging Branches (TERMINAL ACTIONS)
+**If the user asks to "push to preview", "merge to main", "push to origin", or release a branch:**
+1. **DO NOT run `baw claim`** — you are NOT starting a new development session.
+2. **DO NOT inspect or edit source files** — absolute **Merge Freeze**: no "one more tweak", no camera coordinate recalibrations.
+3. **Execute Merge directly from the staging worktree**:
+   ```bash
+   cd <staging-worktree>
+   git fetch origin
+   git switch -c tmp-merge origin/<base-branch>
+   git merge --no-ff <staging-branch> -m "Merge <staging-branch> into <base-branch>: <summary>"
+   git push origin tmp-merge:<base-branch>
+   git switch <staging-branch>
+   git branch -D tmp-merge
+   baw release --worktree <slot-id>
+   ```
+4. Report completion immediately.
+
+---
+
+### Standard Protocol (For New Feature Work / Edits)
+
 ### 1. Identify Available Worktree Slot
 Before executing any code edits, run the status command to view the live slot registry:
 

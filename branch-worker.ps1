@@ -70,10 +70,9 @@ function Get-SlotPath($slot) {
 }
 
 function Set-WriteLock($Path) {
-    $targetPath = if ($Config.lockTargetDir) { Join-Path $Path $Config.lockTargetDir } else { $Path }
-    if (Test-Path $targetPath) {
-        $null = icacls $targetPath /deny "$($env:USERNAME):(OI)(CI)(W,D)" /C /Q 2>$null
-    }
+    # Note: Do not use icacls /deny on directory targets as it blocks Win32 FindFirstFile and causes
+    # git status to report 'warning: could not open directory: No such file or directory' and phantom
+    # deletions. Enforcement against unauthorized commits is handled reliably via .githooks/pre-commit.
 }
 
 function Remove-WriteLock($Path) {

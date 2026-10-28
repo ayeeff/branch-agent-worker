@@ -33,7 +33,7 @@ flowchart TD
 | Layer | Intercepts | Physical Mechanism |
 |---|---|---|
 | **1. Workspace Scoping** | Agent file tree visibility | Sandboxes agent IDE / CLI directly inside the claimed worktree directory (`baw run -- code .`). |
-| **2. OS Filesystem Lock** | Rogue `write_file` / `edit_file` tool calls | Applies NTFS `(OI)(CI)(W,D)` deny rules via `icacls` to unclaimed directories. Unauthorized edits fail with `Access Denied`. |
+| **2. Atomic Session Gate** | Rogue tool calls / multi-agent collisions | Atomic lock arbitration (`.agent-status.json`) with PID liveness tracking and TTL auto-recovery. |
 | **3. Git Commit Gate** | Unauthorized / Desynced commits | Git `pre-commit` hook strictly blocks commits if `.agent-status.json` is missing or if branch is behind upstream. |
 
 ---

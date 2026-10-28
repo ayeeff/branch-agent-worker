@@ -106,22 +106,12 @@ export function getSlotStatus(repoRoot: string, config: BranchWorkerConfig, slot
 
 /**
  * Sets OS-level write locks on the specified directory to physically prevent rogue agent tools from editing files.
+ * NOTE: On Windows NTFS, setting a direct `(OI)(CI)(W,D)` deny ACE on a directory blocks Win32 directory traversal
+ * and causes `git.exe` to fail enumeration ('warning: could not open directory: No such file or directory'),
+ * reporting phantom file deletions. Physical commit enforcement is handled reliably via the .githooks/pre-commit hook.
  */
 export function setOsWriteLock(worktreePath: string, targetSubdir = 'src'): void {
-  if (process.platform !== 'win32') return;
-
-  const targetPath = targetSubdir ? join(worktreePath, targetSubdir) : worktreePath;
-  if (!existsSync(targetPath)) return;
-
-  try {
-    const user = process.env.USERNAME || 'CURRENT_USER';
-    execSync(`icacls "${targetPath}" /deny "${user}:(OI)(CI)(W,D)" /C /Q`, {
-      stdio: 'ignore',
-      timeout: 5000,
-    });
-  } catch {
-    // Non-fatal if OS permissions cannot be modified
-  }
+  // Safe no-op to prevent breaking git.exe directory enumeration on Windows.
 }
 
 /**
