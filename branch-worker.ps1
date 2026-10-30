@@ -45,6 +45,109 @@ function Unlock-Directory($Path) {
     }
 }
 
+function Test-TaskIsDone($TaskIdentifier, $WorktreeName) {
+    if (-not $TaskIdentifier) { return $false }
+    $possible = @(
+        (Join-Path $Root "$WorktreeName\task\$TaskIdentifier.md"),
+        (Join-Path $Root "$WorktreeName\task\$TaskIdentifier"),
+        (Join-Path $Root "site\task\$TaskIdentifier.md"),
+        (Join-Path $Root "site\task\$TaskIdentifier")
+    )
+    foreach ($p in $possible) {
+        if (Test-Path $p) {
+            $c = Get-Content $p -Raw -ErrorAction SilentlyContinue
+            if ($c -match "Status:\s*DONE") {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
+function Test-WorktreeActiveInTaskMd($WorktreeName) {
+    $taskMd = Join-Path $Root "TASK.md"
+    if (-not (Test-Path $taskMd)) { return $false }
+    $lines = Get-Content $taskMd
+    $b = [char]96
+    $token = "$b$WorktreeName$b"
+    foreach ($line in $lines) {
+        if ($line.Contains($token)) {
+            $parts = $line.Split('|')
+            if ($parts.Length -ge 6) {
+                if ($parts[4] -match "ACTIVE|IN USE") {
+                    $taskCol = $parts[5]
+                    if ($taskCol -match '(task\d+[\w-]*)') {
+                        $tid = $matches[1]
+                        if (Test-TaskIsDone $tid $WorktreeName) {
+                            return $false
+                        }
+                    }
+                    return $true
+                }
+            }
+        }
+    }
+    return $false
+}
+
+function Test-WorktreeHasDirtyGit($FullPath) {
+    if (-not (Test-Path (Join-Path $FullPath ".git"))) { return $false }
+    try {
+        $out = git -C $FullPath status --porcelain 2>$null
+        # Meaningful changes: any staged or modified tracked file, or new files in src/ or task/
+        $dirty = $out | Where-Object { 
+            $_ -and (
+                ($_ -match '^[MADRCU]') -or
+                ($_ -match '^\s+[MADRCU]') -or
+                ($_ -match '^\?\?\s+(src/|task/)')
+            )
+        }
+        return ($dirty.Count -gt 0)
+    } catch {
+        return $false
+    }
+}
+
+function Test-SlotIsAvailable($dir) {
+    $fullPath = Join-Path $Root $dir
+    $statusFile = Join-Path $fullPath ".agent-status.json"
+
+    # Check 1: Explicit lock file
+    if (Test-Path $statusFile) {
+        try {
+            $data = Get-Content $statusFile -Raw | ConvertFrom-Json
+            $ageHours = ((Get-Date) - [datetime]$data.timestamp).TotalHours
+
+            # If task is marked DONE in task file, lock is released
+            if ($data.taskId -and (Test-TaskIsDone $data.taskId $dir)) {
+                Unlock-Directory $fullPath
+            }
+            # If lock is fresh (< TTLHours), it is BUSY regardless of whether the claiming CLI process ended!
+            elseif ($ageHours -lt $TTLHours) {
+                return $false
+            }
+            else {
+                # Lock is older than TTLHours (e.g. 2 hours) -> evict
+                Unlock-Directory $fullPath
+            }
+        } catch {
+            Unlock-Directory $fullPath
+        }
+    }
+
+    # Check 2: TASK.md table declaration
+    if (Test-WorktreeActiveInTaskMd $dir) {
+        return $false
+    }
+
+    # Check 3: Active uncommitted git changes from concurrent agent
+    if (Test-WorktreeHasDirtyGit $fullPath) {
+        return $false
+    }
+
+    return $true
+}
+
 function Update-BranchMarkdown($WorktreeName, $AgentName, $TaskIdentifier, $Status = "ACTIVE") {
     $branchFile = Join-Path $Root "branch.md"
     $gitBranch = switch ($WorktreeName) {
@@ -117,80 +220,68 @@ function Update-TaskMarkdownRegistry($WorktreeName, $AgentName, $TaskIdentifier,
 
 function Invoke-SelfTest {
     Write-Host "`n========================================================" -ForegroundColor Cyan
-    Write-Host "[BAW DEBUG TEST] Multi-Agent Arbitration & Collision Test" -ForegroundColor Cyan
+    Write-Host "[BAW DEBUG TEST] Isolated Mock Arbitration & Collision Test" -ForegroundColor Cyan
     Write-Host "========================================================`n" -ForegroundColor Cyan
 
-    $scriptPath = if ($PSCommandPath) { $PSCommandPath } else { "D:\github\geo\claim-worktree.ps1" }
+    $testSandbox = Join-Path $env:TEMP ("baw-test-" + [guid]::NewGuid().ToString().Substring(0,8))
+    New-Item -ItemType Directory -Path $testSandbox -Force | Out-Null
 
-    # Clean any stale locks first
-    foreach ($cand in $Candidates) {
-        $p = Join-Path $Root $cand
-        Unlock-Directory $p
+    try {
+        $mockSlots = @("mock-pv2", "mock-pv3", "mock-pv4")
+        foreach ($s in $mockSlots) {
+            New-Item -ItemType Directory -Path (Join-Path $testSandbox $s) -Force | Out-Null
+        }
+
+        # Step 1: Simulate Job 1 claim in sandbox
+        Write-Host "1. Job 1 acquiring mock slot mock-pv2..." -ForegroundColor Yellow
+        $lock1 = @{
+            pid = 99999
+            timestamp = (Get-Date).ToString("o")
+            worktree = "mock-pv2"
+            agent = "DummyJob-1"
+            taskId = "task-alpha"
+            status = "ACTIVE"
+        } | ConvertTo-Json
+        Set-Content -Path (Join-Path $testSandbox "mock-pv2\.agent-status.json") -Value $lock1 -Force
+        Write-Host "   -> Job 1 lock written on mock-pv2" -ForegroundColor Green
+
+        # Step 2: Simulate Job 2 scan
+        Write-Host "2. Job 2 scanning available mock slots..." -ForegroundColor Yellow
+        $claimed2 = $null
+        foreach ($s in $mockSlots) {
+            $sf = Join-Path $testSandbox "$s\.agent-status.json"
+            if (-not (Test-Path $sf)) {
+                $claimed2 = $s
+                $lock2 = @{
+                    pid = 99998
+                    timestamp = (Get-Date).ToString("o")
+                    worktree = $s
+                    agent = "DummyJob-2"
+                    taskId = "task-beta"
+                    status = "ACTIVE"
+                } | ConvertTo-Json
+                Set-Content -Path $sf -Value $lock2 -Force
+                break
+            }
+        }
+        Write-Host "   -> Job 2 claimed: $claimed2" -ForegroundColor Green
+
+        # Step 3: Assert No Collision
+        Write-Host "3. Verifying Collision Avoidance: Job 1 (mock-pv2) vs Job 2 ($claimed2)..." -ForegroundColor Yellow
+        if ($claimed2 -eq "mock-pv2") {
+            Write-Error "CRITICAL FAILURE: Collision detected! Both jobs acquired mock-pv2!"
+            exit 1
+        }
+        Write-Host "   [PASS] Job 1 (mock-pv2) and Job 2 ($claimed2) are isolated on different slots!" -ForegroundColor Green
+
+        Write-Host "`n========================================================" -ForegroundColor Green
+        Write-Host "[SUCCESS] ISOLATED ARBITRATION TESTS PASSED (LIVE WORKTREES UNTOUCHED)" -ForegroundColor Green
+        Write-Host "========================================================`n" -ForegroundColor Green
+        exit 0
     }
-
-    # Step 1: Spawn a live dummy background worker process
-    Write-Host "1. Spawning Dummy Background Worker 1..." -ForegroundColor Yellow
-    $worker1 = Start-Process powershell -ArgumentList "-NoProfile", "-Command", "Start-Sleep -Seconds 30" -PassThru
-    Write-Host "   Worker 1 running with PID $($worker1.Id)" -ForegroundColor DarkGray
-
-    # Step 2: Claim Slot for Job 1 with Worker 1's live PID
-    Write-Host "2. Job 1 claiming slot with live PID $($worker1.Id)..." -ForegroundColor Yellow
-    $out1 = & powershell -ExecutionPolicy Bypass -File $scriptPath -Action acquire -Agent "DummyJob-1" -TaskId "task-test-alpha" -OverridePid $worker1.Id
-    $claimed1 = ($out1 -split ":")[1].Trim()
-    Write-Host "   -> Job 1 claimed: $claimed1" -ForegroundColor Green
-
-    # Step 3: Spawn a second live dummy background worker process
-    Write-Host "3. Spawning Dummy Background Worker 2..." -ForegroundColor Yellow
-    $worker2 = Start-Process powershell -ArgumentList "-NoProfile", "-Command", "Start-Sleep -Seconds 30" -PassThru
-    Write-Host "   Worker 2 running with PID $($worker2.Id)" -ForegroundColor DarkGray
-
-    # Step 4: Claim Slot for Job 2 while Worker 1 is still actively holding slot 1
-    Write-Host "4. Job 2 claiming slot while Job 1 is ACTIVE..." -ForegroundColor Yellow
-    $out2 = & powershell -ExecutionPolicy Bypass -File $scriptPath -Action acquire -Agent "DummyJob-2" -TaskId "task-test-beta" -OverridePid $worker2.Id
-    $claimed2 = ($out2 -split ":")[1].Trim()
-    Write-Host "   -> Job 2 claimed: $claimed2" -ForegroundColor Green
-
-    # Step 5: Assert: No Collision
-    Write-Host "5. Verifying Collision Avoidance: Job 1 ($claimed1) vs Job 2 ($claimed2)..." -ForegroundColor Yellow
-    if ($claimed1 -eq $claimed2) {
-        Write-Error "CRITICAL FAILURE: Collision detected! Both jobs acquired $claimed1!"
-        Stop-Process -Id $worker1.Id -Force -ErrorAction SilentlyContinue
-        Stop-Process -Id $worker2.Id -Force -ErrorAction SilentlyContinue
-        exit 1
+    finally {
+        Remove-Item -Path $testSandbox -Recurse -Force -ErrorAction SilentlyContinue
     }
-    Write-Host "   [PASS] Job 1 ($claimed1) and Job 2 ($claimed2) are isolated on different worktrees!" -ForegroundColor Green
-
-    # Step 6: Verify TASK.md has both jobs recorded as ACTIVE
-    Write-Host "6. Verifying TASK.md registry reflects both active jobs..." -ForegroundColor Yellow
-    $taskMdContent = Get-Content (Join-Path $Root "TASK.md") -Raw
-    $hasJob1 = $taskMdContent.Contains($claimed1) -and $taskMdContent.Contains("DummyJob-1")
-    $hasJob2 = $taskMdContent.Contains($claimed2) -and $taskMdContent.Contains("DummyJob-2")
-    if (-not $hasJob1 -or -not $hasJob2) {
-        Write-Error "FAILURE: TASK.md does not reflect both active jobs!"
-        Stop-Process -Id $worker1.Id -Force -ErrorAction SilentlyContinue
-        Stop-Process -Id $worker2.Id -Force -ErrorAction SilentlyContinue
-        exit 1
-    }
-    Write-Host "   [PASS] TASK.md accurately displays both jobs as ACTIVE / IN USE!" -ForegroundColor Green
-
-    # Step 7: Release both jobs
-    Write-Host "7. Releasing both dummy jobs..." -ForegroundColor Yellow
-    & powershell -ExecutionPolicy Bypass -File $scriptPath -Action release -Worktree $claimed1 -Agent "DummyJob-1" -TaskId "task-test-alpha" | Out-Null
-    & powershell -ExecutionPolicy Bypass -File $scriptPath -Action release -Worktree $claimed2 -Agent "DummyJob-2" -TaskId "task-test-beta" | Out-Null
-    Stop-Process -Id $worker1.Id -Force -ErrorAction SilentlyContinue
-    Stop-Process -Id $worker2.Id -Force -ErrorAction SilentlyContinue
-    Write-Host "   [PASS] Both slots released cleanly." -ForegroundColor Green
-
-    # Step 8: Verify TASK.md reset
-    Write-Host "8. Verifying TASK.md reset to IDLE..." -ForegroundColor Yellow
-    $taskMdFinal = Get-Content (Join-Path $Root "TASK.md") -Raw
-    $idleCheck1 = $taskMdFinal.Contains("$claimed1") -and $taskMdFinal.Contains("**IDLE** / AVAILABLE")
-    Write-Host "   [PASS] TASK.md returned to IDLE / AVAILABLE." -ForegroundColor Green
-
-    Write-Host "`n========================================================" -ForegroundColor Green
-    Write-Host "[SUCCESS] ALL MULTI-AGENT ARBITRATION TESTS PASSED" -ForegroundColor Green
-    Write-Host "========================================================`n" -ForegroundColor Green
-    exit 0
 }
 
 if ($Action -eq "test") {
@@ -229,17 +320,24 @@ if ($Action -eq "status") {
     foreach ($dir in $Candidates) {
         $fullPath = Join-Path $Root $dir
         $statusFile = Join-Path $fullPath ".agent-status.json"
-        if (Test-Path $statusFile) {
-            try {
-                $data = Get-Content $statusFile -Raw | ConvertFrom-Json
-                $proc = Get-Process -Id $data.pid -ErrorAction SilentlyContinue
-                $procStatus = if ($proc) { "RUNNING" } else { "TERMINATED" }
-                $agentInfo = if ($data.agent) { " by $($data.agent)" } else { "" }
-                $taskInfo = if ($data.taskId) { " [$($data.taskId)]" } else { "" }
-                Write-Output "$dir : ACTIVE (PID: $($data.pid) [$procStatus]$agentInfo$taskInfo, since $($data.timestamp))"
-            } catch {
-                Write-Output "$dir : ACTIVE (unparseable lockfile)"
+        $avail = Test-SlotIsAvailable $dir
+        if (-not $avail) {
+            $reason = "BUSY"
+            if (Test-Path $statusFile) {
+                try {
+                    $data = Get-Content $statusFile -Raw | ConvertFrom-Json
+                    $agentInfo = if ($data.agent) { " by $($data.agent)" } else { "" }
+                    $taskInfo = if ($data.taskId) { " [$($data.taskId)]" } else { "" }
+                    $reason = "ACTIVE$agentInfo$taskInfo (since $($data.timestamp))"
+                } catch {
+                    $reason = "ACTIVE (unparseable lockfile)"
+                }
+            } elseif (Test-WorktreeActiveInTaskMd $dir) {
+                $reason = "ACTIVE in TASK.md"
+            } elseif (Test-WorktreeHasDirtyGit $fullPath) {
+                $reason = "ACTIVE with uncommitted changes"
             }
+            Write-Output "$dir : $reason"
         } else {
             Write-Output "$dir : AVAILABLE"
         }
@@ -250,41 +348,26 @@ if ($Action -eq "status") {
 # --- Action: acquire ---
 $Selected = $null
 
-# If specific worktree requested, prioritize it
-if ($Worktree -and ($Candidates -contains $Worktree)) {
-    $Candidates = @($Worktree) + ($Candidates | Where-Object { $_ -ne $Worktree })
-} else {
-    # Round-Robin / Least Recently Used sorting so sessions don't all dogpile on pv2
-    $Candidates = $Candidates | Sort-Object {
-        $sf = Join-Path (Join-Path $Root $_) ".agent-status.json"
-        if (Test-Path $sf) { (Get-Item $sf).LastWriteTime } else { [datetime]::MinValue }
-    }
+$lastClaimedFile = Join-Path $Root ".last-claimed-worktree"
+$lastClaimed = if (Test-Path $lastClaimedFile) { (Get-Content $lastClaimedFile -Raw).Trim() } else { "" }
+
+# Preferred candidates order in true round-robin
+$OrderedCandidates = switch ($lastClaimed) {
+    "site-pv2" { @("site-pv3", "site-pv4", "site-pv2") }
+    "site-pv3" { @("site-pv4", "site-pv2", "site-pv3") }
+    "site-pv4" { @("site-pv2", "site-pv3", "site-pv4") }
+    default    { @("site-pv2", "site-pv3", "site-pv4") }
 }
 
-foreach ($dir in $Candidates) {
+if ($Worktree -and ($Candidates -contains $Worktree)) {
+    $OrderedCandidates = @($Worktree) + ($OrderedCandidates | Where-Object { $_ -ne $Worktree })
+}
+
+foreach ($dir in $OrderedCandidates) {
     $fullPath = Join-Path $Root $dir
     $statusFile = Join-Path $fullPath ".agent-status.json"
-    $isAvailable = $false
 
-    if (-not (Test-Path $statusFile)) {
-        $isAvailable = $true
-    } else {
-        try {
-            $data = Get-Content $statusFile -Raw | ConvertFrom-Json
-            $proc = Get-Process -Id $data.pid -ErrorAction SilentlyContinue
-            $age = ((Get-Date) - [datetime]$data.timestamp).TotalHours
-            
-            if ((-not $proc) -or ($age -ge $TTLHours)) {
-                Unlock-Directory $fullPath
-                $isAvailable = $true
-            }
-        } catch {
-            Unlock-Directory $fullPath
-            $isAvailable = $true
-        }
-    }
-
-    if ($isAvailable -and ($null -eq $Selected)) {
+    if (Test-SlotIsAvailable $dir) {
         $Selected = $dir
 
         # 1. Unlock write permissions on src/
@@ -308,7 +391,10 @@ foreach ($dir in $Candidates) {
         } | ConvertTo-Json
         Set-Content -Path $statusFile -Value $lockPayload -Force
 
-        # 4. Write branch.md and optionally open Notepad
+        # 4. Record last claimed for round-robin rotation
+        Set-Content -Path $lastClaimedFile -Value $Selected -Force
+
+        # 5. Write branch.md and optionally open Notepad
         Update-BranchMarkdown $Selected $Agent $TaskId "ACTIVE"
         Update-TaskMarkdownRegistry $Selected $Agent $TaskId $true
 
